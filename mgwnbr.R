@@ -292,17 +292,17 @@ gwr_local <- function(H, y, x, fi, alpha_val = 0.5, method, model, N, nvarg, wt,
 # Golden Section Search for optimal alpha
 
 find_optimal_alpha_gss <- function(
-    H, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta, tol = 0.01, verbose = TRUE, multi_bw = FALSE
+    H, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta, tol = 0.01, verbose = TRUE
 ) {
   cat("Searching optimal alpha for spatial and attribute similarity weight matrix....\n")
-  
-  # Initialize Phi for Golden Section Search
   phi <- (1 + sqrt(5)) / 2
+  a <- 0.0
+  b <- 1.0
   
-  # Function to evaluate AICc for a given alpha value
-  eval_aicc <- function(alpha_val, H_current) {
-    tryCatch({
-      res <- gwr_local(H_current, Y, X, finb, alpha_val, method, model, N, nvarg, wt, E, COORD, sequ, distancekm, Offset, parg, yhat_beta)
+  # Evaluate endpoints
+  fa <- {
+    aicc <- eval_aicc <- function(alpha_val) {
+      res <- gwr_local(H, Y, X, finb, alpha_val, method, model, N, nvarg, wt, E, COORD, sequ, distancekm, Offset, parg, yhat_beta)
       local_yhbeta <- res$yhbeta
       local_beta <- local_yhbeta[, 2:(nvarg + 1)]
       Fi <- X * local_beta
@@ -310,91 +310,41 @@ find_optimal_alpha_gss <- function(
       alphai <- res$alphai
       v1 <- sum(diag(sm))
       yhat <- exp(apply(Fi, 1, sum) + Offset)
-      ll <- sum(Y * log(alphai[, 2] * yhat) - (Y + 1 / alphai[, 2]) * log(1 + alphai[, 2] * yhat) +
-                  lgamma(Y + 1 / alphai[, 2]) - lgamma(1 / alphai[, 2]) - lgamma(Y + 1))
-      AIC <- 2 * (v1 + v1 / nvarg) - 2 * ll
-      AICc <- AIC + 2 * (v1 + v1 / nvarg) * (v1 + v1 / nvarg + 1) / (N - (v1 + v1 / nvarg) - 1)
-      if (verbose) cat("Tested alpha =", round(alpha_val, 4), "Bandwidth =", H_current, "AICc =", round(AICc, 4), "\n")
+      ll <- sum(Y * log(alphai[,2] * yhat) - (Y + 1/alphai[,2]) * log(1 + alphai[,2] * yhat) +
+                  lgamma(Y + 1/alphai[,2]) - lgamma(1/alphai[,2]) - lgamma(Y + 1))
+      AIC <- 2 * (v1 + v1/nvarg) - 2 * ll
+      AICc <- AIC + 2 * (v1 + v1/nvarg) * (v1 + v1/nvarg + 1) / (N - (v1 + v1/nvarg) - 1)
+      if (verbose) cat("Tested alpha =", round(alpha_val, 4), "AICc =", round(AICc, 4), "\n")
       return(AICc)
-    }, error = function(e) {
-      if (verbose) cat("Error evaluating alpha =", round(alpha_val, 4), ":", e$message, "\n")
-      return(Inf)  # Return a very high AICc to avoid selecting this alpha
-    })
-  }
-  
-  # For multiple bandwidths (multi_bw = TRUE), iterate through each bandwidth
-  if (multi_bw) {
-    optimal_results <- lapply(H, function(H_current) {
-      a <- 0.0
-      b <- 1.0
-      
-      # Evaluate endpoints
-      fa <- eval_aicc(a, H_current)
-      fb <- eval_aicc(b, H_current)
-      
-      step <- 1
-      if (verbose) cat("[alpha-opt] Step", step, "a=", round(a, 4), "AICc_a=", round(fa, 4), "b=", round(b, 4), "AICc_b=", round(fb, 4), "\n")
-      
-      while (abs(b - a) > tol) {
-        step <- step + 1
-        if (fa < fb) {
-          # Update upper bound
-          b_new <- a + (b - a) / phi
-          fb <- eval_aicc(b_new, H_current)
-          if (verbose) cat("[alpha-opt] Step", step, "a=", round(a, 4), "AICc_a=", round(fa, 4), "b=", round(b_new, 4), "AICc_b=", round(fb, 4), "\n")
-          b <- b_new
-        } else {
-          # Update lower bound
-          a_new <- b - (b - a) / phi
-          fa <- eval_aicc(a_new, H_current)
-          if (verbose) cat("[alpha-opt] Step", step, "a=", round(a_new, 4), "AICc_a=", round(fa, 4), "b=", round(b, 4), "AICc_b=", round(fb, 4), "\n")
-          a <- a_new
-        }
-      }
-      
-      optimal_alpha <- (a + b) / 2
-      cat("Optimal alpha for bandwidth", H_current, "found:", round(optimal_alpha, 4), "\n")
-      return(list(bandwidth = H_current, alpha = optimal_alpha))
-    })
-    
-    # Return all results
-    return(optimal_results)
-    
-  } else {  # Single bandwidth case
-    a <- 0.0
-    b <- 1.0
-    
-    # Evaluate endpoints
-    fa <- eval_aicc(a, H)
-    fb <- eval_aicc(b, H)
-    
-    step <- 1
-    if (verbose) cat("[alpha-opt] Step", step, "a=", round(a, 4), "AICc_a=", round(fa, 4), "b=", round(b, 4), "AICc_b=", round(fb, 4), "\n")
-    
-    while (abs(b - a) > tol) {
-      step <- step + 1
-      if (fa < fb) {
-        # Update upper bound
-        b_new <- a + (b - a) / phi
-        fb <- eval_aicc(b_new, H)
-        if (verbose) cat("[alpha-opt] Step", step, "a=", round(a, 4), "AICc_a=", round(fa, 4), "b=", round(b_new, 4), "AICc_b=", round(fb, 4), "\n")
-        b <- b_new
-      } else {
-        # Update lower bound
-        a_new <- b - (b - a) / phi
-        fa <- eval_aicc(a_new, H)
-        if (verbose) cat("[alpha-opt] Step", step, "a=", round(a_new, 4), "AICc_a=", round(fa, 4), "b=", round(b, 4), "AICc_b=", round(fb, 4), "\n")
-        a <- a_new
-      }
     }
-    
-    optimal_alpha <- (a + b) / 2
-    cat("Optimal alpha found:", round(optimal_alpha, 4), "\n")
-    return(optimal_alpha)
+    aicc(a)
   }
+  fb <- {
+    aicc <- eval_aicc
+    aicc(b)
+  }
+  step <- 1
+  if (verbose) cat("[alpha-opt] Step", step, "a=", round(a,4), "AICc_a=", round(fa,4), "b=", round(b,4), "AICc_b=", round(fb,4), "\n")
+  while (abs(b - a) > tol) {
+    step <- step + 1
+    if (fa < fb) {
+      # Update upper bound
+      b_new <- a + (b - a)/phi
+      fb <- eval_aicc(b_new)
+      if (verbose) cat("[alpha-opt] Step", step, "a=", round(a,4), "AICc_a=", round(fa,4), "b=", round(b_new,4), "AICc_b=", round(fb,4), "\n")
+      b <- b_new
+    } else {
+      # Update lower bound
+      a_new <- b - (b - a)/phi
+      fa <- eval_aicc(a_new)
+      if (verbose) cat("[alpha-opt] Step", step, "a=", round(a_new,4), "AICc_a=", round(fa,4), "b=", round(b,4), "AICc_b=", round(fb,4), "\n")
+      a <- a_new
+    }
+  }
+  optimal_alpha <- (a + b) / 2
+  cat("Optimal alpha found:", round(optimal_alpha, 4), "\n")
+  return(optimal_alpha)
 }
-
-
 
 mgwnbr <- function(data, formula, weight=NULL, lat, long,
                    globalmin=TRUE, method, model="negbin",
@@ -894,25 +844,22 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     res <- cbind(CV, npar)
     return (res)
   }
-  
-  GSS <- function(depy, indepx, fix) {
-    # Define Golden Section Search parameters
-    if (method == "fixed_g" | method == "fixed_bsq") {
+  GSS <- function(depy, indepx, fix){
+    # DEFINING GOLDEN SECTION SEARCH PARAMETERS #
+    if(method=="fixed_g" | method=="fixed_bsq"){
       ax <- 0
-      bx <- as.integer(max(dist(COORD)) + 1)
-      if (distancekm) {
-        bx <- bx * 111
+      bx <- as.integer(max(dist(COORD))+1)
+      if (distancekm){
+        bx <- bx*111
       }
-    } else if (method == "adaptive_bsq" | method == "adaptive_bsq_smr") {
+    }
+    else if (method=="adaptive_bsq" | method=="adaptive_bsq_smr"){
       ax <- 5
       bx <- N
     }
-    
-    r <- 0.61803399  # Golden ratio
-    tol <- 0.1       # Tolerance for convergence
-    
-    # Non-global minimum search
-    if (!globalmin) {
+    r <- 0.61803399
+    tol <- 0.1
+    if (!globalmin){
       lower <- ax
       upper <- bx
       xmin <- matrix(0, 1, 2)
@@ -921,116 +868,165 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
       bx1 <- upper[GMY]
       h0 <- ax1
       h3 <- bx1
-      h1 <- bx1 - r * (bx1 - ax1)
-      h2 <- ax1 + r * (bx1 - ax1)
-      
-      # Evaluate CV for initial points
+      h1 <- bx1-r*(bx1-ax1)
+      h2 <- ax1+r*(bx1-ax1)
       res1 <- cv(h1, depy, indepx, fix)
+      assign("s", s, envir=parent.frame())
+      if (model!="gaussian"){ #release 2
+        assign("ai", ai, envir=parent.frame())
+      }#release 2
+      assign("yhat", yhat, envir=parent.frame())
+      assign("alphai", alphai, envir=parent.frame())
       CV1 <- res1[1]
-      res2 <- cv(h2, depy, indepx, fix)
+      res2 <- cv(h2,depy,indepx,fix)
+      assign("s", s, envir=parent.frame())
+      if (model!="gaussian"){ #release 2
+        assign("ai", ai, envir=parent.frame())
+      } #release 2
+      assign("yhat", yhat, envir=parent.frame())
+      assign("alphai", alphai, envir=parent.frame())
       CV2 <- res2[1]
       INT <- 1
-      
-      # Golden Section Search loop
-      while (abs(h3 - h0) > tol * (abs(h1) + abs(h2)) & INT < 200) {
-        if (CV2 < CV1) {
+      while(abs(h3-h0) > tol*(abs(h1)+abs(h2)) & INT<200){
+        if (CV2<CV1){
           h0 <- h1
-          h1 <- h3 - r * (h3 - h0)
-          h2 <- h0 + r * (h3 - h0)
+          h1 <- h3-r*(h3-h0)
+          h2 <- h0+r*(h3-h0)
           CV1 <- CV2
-          res2 <- cv(h2, depy, indepx, fix)
+          res2 <- cv(h2,depy,indepx,fix)
+          assign("s", s, envir=parent.frame())
+          if (model!="gaussian"){ #release 2
+            assign("ai", ai, envir=parent.frame())
+          } #release 2
+          assign("yhat", yhat, envir=parent.frame())
+          assign("alphai", alphai, envir=parent.frame())
           CV2 <- res2[1]
-        } else {
+        }
+        else{
           h3 <- h2
-          h1 <- h3 - r * (h3 - h0)
-          h2 <- h0 + r * (h3 - h0)
+          h1 <- h3-r*(h3-h0)
+          h2 <- h0+r*(h3-h0)
           CV2 <- CV1
           res1 <- cv(h1, depy, indepx, fix)
+          assign("s", s, envir=parent.frame())
+          if (model!="gaussian"){ #release 2
+            assign("ai", ai, envir=parent.frame())
+          } #release 2
+          assign("yhat", yhat, envir=parent.frame())
+          assign("alphai", alphai, envir=parent.frame())
           CV1 <- res1[1]
         }
-        INT <- INT + 1
+        INT <- INT+1
       }
-      
-      # Determine the best bandwidth
-      if (CV1 < CV2) {
+      if (CV1<CV2){
         golden <- CV1
         xmin[GMY, 1] <- golden
         xmin[GMY, 2] <- h1
-      } else {
+        npar <- res1[1]
+        if (method=="adaptive_bsq"| method=="adaptive_bsq_smr"){
+          xmin[GMY, 2] <- floor(h1)
+          xming <- xmin[GMY, 2]
+        }
+      }
+      else{
         golden <- CV2
         xmin[GMY, 1] <- golden
         xmin[GMY, 2] <- h2
-      }
-      
-      if (method == "adaptive_bsq" | method == "adaptive_bsq_smr") {
-        xmin[GMY, 2] <- floor(xmin[GMY, 2])
+        npar <- res2[1]
+        if (method=="adaptive_bsq"| method=="adaptive_bsq_smr"){
+          xmin[GMY, 2] <- floor(h2)
+          xming <- xmin[GMY, 2]
+        }
       }
       xming <- xmin[GMY, 2]
-    } else {
-      # Global minimum search
-      lower <- cbind(ax, (1 - r) * bx, r * bx)
-      upper <- cbind((1 - r) * bx, r * bx, bx)
+    }
+    else{
+      lower <- cbind(ax, (1-r)*bx, r*bx)
+      upper <- cbind((1-r)*bx, r*bx, bx)
       xmin <- matrix(0, 3, 2)
-      
-      for (GMY in 1:3) {
+      for (GMY in 1:3){
         ax1 <- lower[GMY]
         bx1 <- upper[GMY]
         h0 <- ax1
         h3 <- bx1
-        h1 <- bx1 - r * (bx1 - ax1)
-        h2 <- ax1 + r * (bx1 - ax1)
-        
-        # Evaluate CV for initial points
+        h1 <- bx1-r*(bx1-ax1)
+        h2 <- ax1+r*(bx1-ax1)
         res1 <- cv(h1, depy, indepx, fix)
+        assign("s", s, envir=parent.frame())
+        if (model!="gaussian"){ #release 2
+          assign("ai", ai, envir=parent.frame())
+        } #release 2
+        assign("yhat", yhat, envir=parent.frame())
+        assign("alphai", alphai, envir=parent.frame())
         CV1 <- res1[1]
-        res2 <- cv(h2, depy, indepx, fix)
+        res2 <- cv(h2,depy,indepx,fix)
+        assign("s", s, envir=parent.frame())
+        if (model!="gaussian"){ #release 2
+          assign("ai", ai, envir=parent.frame())
+        } #release 2
+        assign("yhat", yhat, envir=parent.frame())
+        assign("alphai", alphai, envir=parent.frame())
         CV2 <- res2[1]
         INT <- 1
-        
-        # Golden Section Search loop
-        while (abs(h3 - h0) > tol * (abs(h1) + abs(h2)) & INT < 200) {
-          if (CV2 < CV1) {
+        while(abs(h3-h0) > tol*(abs(h1)+abs(h2)) & INT<200){
+          if (CV2<CV1){
             h0 <- h1
-            h1 <- h3 - r * (h3 - h0)
-            h2 <- h0 + r * (h3 - h0)
+            h1 <- h3-r*(h3-h0)
+            h2 <- h0+r*(h3-h0)
             CV1 <- CV2
-            res2 <- cv(h2, depy, indepx, fix)
+            res2 <- cv(h2,depy,indepx,fix)
+            assign("s", s, envir=parent.frame())
+            if (model!="gaussian"){ #release 2
+              assign("ai", ai, envir=parent.frame())
+            } #release 2
+            assign("yhat", yhat, envir=parent.frame())
+            assign("alphai", alphai, envir=parent.frame())
             CV2 <- res2[1]
-          } else {
+          }
+          else{
             h3 <- h2
-            h1 <- h3 - r * (h3 - h0)
-            h2 <- h0 + r * (h3 - h0)
+            h1 <- h3-r*(h3-h0)
+            h2 <- h0+r*(h3-h0)
             CV2 <- CV1
             res1 <- cv(h1, depy, indepx, fix)
+            assign("s", s, envir=parent.frame())
+            if (model!="gaussian"){ #release 2
+              assign("ai", ai, envir=parent.frame())
+            } #release 2
+            assign("yhat", yhat, envir=parent.frame())
+            assign("alphai", alphai, envir=parent.frame())
             CV1 <- res1[1]
           }
-          INT <- INT + 1
+          INT <- INT+1
         }
-        
-        # Determine the best bandwidth
-        if (CV1 < CV2) {
+        if (CV1<CV2){
           golden <- CV1
-          xmin[GMY, 1] <- golden
-          xmin[GMY, 2] <- h1
-        } else {
+          xmin[GMY,1] <- golden
+          xmin[GMY,2] <- h1
+          npar <- res1[1]
+          if (method=="adaptive_bsq"| method=="adaptive_bsq_smr"){
+            xmin[GMY,2] <- floor(h1)
+            xming <- xmin[GMY,2]
+          }
+        }
+        else{
           golden <- CV2
-          xmin[GMY, 1] <- golden
-          xmin[GMY, 2] <- h2
+          xmin[GMY,1] <- golden
+          xmin[GMY,2] <- h2
+          npar <- res2[1]
+          if (method=="adaptive_bsq"| method=="adaptive_bsq_smr"){
+            xmin[GMY,2] <- floor(h2)
+            xming <- xmin[GMY,2]
+          }
         }
-        
-        if (method == "adaptive_bsq" | method == "adaptive_bsq_smr") {
-          xmin[GMY, 2] <- floor(xmin[GMY, 2])
-        }
-      }
-      
-      if (globalmin) {
-        xming <- xmin[which(xmin[, 1] == min(xmin[, 1])), 2]
+        xming <- xmin[GMY,2]
       }
     }
-    
-    # Return the optimal bandwidth
+    if (globalmin){
+      xming <- xmin[which(xmin[,1]==min(xmin[,1])),2]
+    }
     bandwidth <- xming
-    return(bandwidth)
+    return (bandwidth)
   }
   
   gwr <- function(H, y, x, fi, alpha_val = NULL) {
@@ -1394,109 +1390,129 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     return (yhbeta)
   }
   
-  if (!mgwr) {
-    # Single bandwidth case
+  
+  
+  if (!mgwr){
     finb <- rep(0, N)
     yhat_beta <- Offset
-    
-    # Determine the general bandwidth
-    hh <- if (!is.null(h)) h else GSS(Y, X, finb)
+    if (!is.null(h)){
+      hh <- h
+    }
+    else{
+      hh <- GSS(Y,X,finb)
+    }
     header <- append(header, "General Bandwidth")
     output <- append(output, hh)
     names(output) <- "general_bandwidth"
     
-    # Handle adaptive_bsq_smr method with alpha optimization
+    # === PATCH: pencarian optimal alpha khusus method adaptive_bsq_smr ===
     if (method == "adaptive_bsq_smr") {
       optimal_alpha <- find_optimal_alpha_gss(
         hh, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta
       )
-      
       res <- gwr_local(
-        H = hh, y = Y, x = X, fi = finb, alpha_val = optimal_alpha,
-        method = method, model = model, N = N, nvarg = nvarg, wt = wt, E = E,
-        COORD = COORD, sequ = sequ, distancekm = distancekm, Offset = Offset,
+        H = hh, y = Y, x = X, fi = finb, alpha_val = optimal_alpha, 
+        method = method, model = model, N = N, nvarg = nvarg, wt = wt, E = E, 
+        COORD = COORD, sequ = sequ, distancekm = distancekm, Offset = Offset, 
         parg = parg, yhat_beta = yhat_beta
       )
-      
       yhat_beta <- res$yhbeta
       sm <- res$sm
+      alphai <- res$alphai
+      sm3 <- res$sm3
+      # Jika ingin menyimpan optimal_alpha di output:
       output$optimal_alpha <- optimal_alpha
     } else {
-      # Use standard gwr if alpha optimization is not required
-      yhat_beta <- gwr(hh, Y, X, finb)
+      # method lain tetap pakai gwr versi lama
+      yhat_beta <- gwr(hh,Y,X,finb)
     }
     
-    # Calculate beta and Fi
-    beta <- yhat_beta[, 2:(nvarg + 1)]
-    Fi <- X * beta
-  } else {
-    # Multiscale bandwidth case (MGWR)
+    beta <- yhat_beta[,2:(nvarg+1)]
+    Fi <- X*beta
+    mband <- hh
+    Sm2 <- sm
+  }
+  else{
     finb <- rep(0, N)
     yhat_beta <- Offset
-    
-    # Determine the general bandwidth
-    hh <- if (!is.null(h)) h else GSS(Y, X, finb)
+    if (!is.null(h)){
+      hh <- h
+    }
+    else{
+      hh <- GSS(Y,X,finb)
+    }
     header <- append(header, "General Bandwidth")
     output <- append(output, hh)
     names(output) <- "general_bandwidth"
-    
-    # Initial GWR with general bandwidth
+    #computing residuals
     yhat_beta <- gwr(hh, Y, X, finb)
-    error <- Y - yhat_beta[, 1]
-    beta <- yhat_beta[, 2:(nvarg + 1)]
-    Fi <- X * beta
-    
-    # Initialize bandwidths and convergence metrics
+    error <- Y-yhat_beta[ ,1]
+    beta <- yhat_beta[ ,2:(nvarg+1)]
+    Fi <- X*beta
+    Sm2 <- sm
+    for (jj in 1:nvarg){
+      m1 <- (jj-1)*N+1
+      m2 <- m1+(N-1)
+    }
     mband <- rep(hh, nvarg)
     socf <- 1
     INT <- 1
     mband_socf <- c(mband, socf)
-    
-    # Iterative process for multiscale bandwidth optimization
-    while (socf > 0.001 && INT < int) {
+    while (socf>0.001 & INT<int){
       fi_old <- Fi
       diffi <- 0
       fi2 <- 0
-      
-      for (i in 1:nvarg) {
-        # Update residuals for the current covariate
-        ferror <- error + Fi[, i]
-        
-        # Determine bandwidth for the current covariate
-        mband[i] <- if (!is.null(h)) h else GSS(ferror, as.matrix(X[, i]), finb)
-        
-        # Re-evaluate alpha for adaptive_bsq_smr method
-        optimal_alpha <- if (method == "adaptive_bsq_smr") {
-          find_optimal_alpha_gss(
-            mband[i], ferror, as.matrix(X[, i]), finb, N, 1, Offset,
-            method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta
-          )
-        } else {
-          NULL
+      for (i in 1:nvarg){
+        if (model=="gaussian"){
+          ferror <- error+Fi[,i]
+          if (!is.null(h)){
+            mband[i] <- h
+          }
+          else{
+            mband[i] <- GSS(ferror, as.matrix(X[,i]), finb)
+          }
+          yhat_beta <- gwr(mband[i], ferror, as.matrix(X[,i]), finb)
+          beta[,i] <- yhat_beta[,2]
+          Fi[,i] <- X[,i]*beta[,i]
+          error <- Y-apply(Fi, 1, sum)
+          m1 <- (i-1)*N+1
+          m2 <- m1+(N-1)
+          mrj2 <- mrj[,m1:m2]
+          mrj[,m1:m2] <- rj%*%mrj[,m1:m2]+rj-rj%*%sm
+          sm <- sm-mrj2+mrj[,m1:m2]
+          Cm[,m1:m2] <- (1/X[,i])*mrj[,m1:m2]
         }
-        
-        # Perform GWR with the determined bandwidth and alpha
-        yhat_beta <- gwr(mband[i], ferror, as.matrix(X[, i]), finb, alpha_val = optimal_alpha)
-        beta[, i] <- yhat_beta[, 2]
-        Fi[, i] <- X[, i] * beta[, i]
-        error <- Y - apply(Fi, 1, sum)
-        
-        # Update convergence metrics
-        diffi <- diffi + mean((Fi[, i] - fi_old[, i])^2)
-        fi2 <- fi2 + Fi[, i]
+        else{ #else if (model=="poisson" | model=="negbin" | model=="logistic"){
+          yhat_beta <- (apply(Fi, 1, sum)+Offset)
+          if (!is.null(h)){
+            mband[i] <- h
+          }
+          else{
+            mband[i] <- GSS(Y, as.matrix(X[,i]), Fi[,i])
+          }
+          yhat_beta <- gwr(mband[i], Y, as.matrix(X[,i]), Fi[,i])
+          beta[,i] <- yhat_beta[,2]
+          Fi[,i] <- X[,i]*beta[,i]
+          m1 <- (i-1)*N+1
+          m2 <- m1+(N-1)
+          mrj2 <- mrj[,m1:m2]
+          mrj[,m1:m2] <- rj%*%mrj[,m1:m2]+rj-rj%*%sm
+          sm <- sm-mrj2+mrj[,m1:m2]
+          Cm[,m1:m2] <- (1/X[,i])*mrj[,m1:m2]
+          mAi[,i] <- ai
+        }
+        diffi <- diffi+mean((Fi[,i]-fi_old[,i])^2)
+        fi2 <- fi2+Fi[,i]
       }
-      
-      # Check for convergence
-      socf <- sqrt(diffi / sum(fi2^2))
-      INT <- INT + 1
+      socf <- sqrt(diffi/sum(fi2^2))
+      INT <- INT+1
       mband_socf <- rbind(mband_socf, c(mband, socf))
     }
-    
-    # Format the final bandwidth results
     mband_socf <- mband_socf[-1, ]
-    if (is.null(dim(mband_socf))) {
+    if (is.null(dim(mband_socf))){
       band <- as.data.frame(t(mband_socf))
-    } else {
+    }
+    else{
       band <- as.data.frame(mband_socf)
     }
     names(band) <- c("Intercept", XVAR, "socf")
@@ -1505,8 +1521,6 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     output <- append(output, list(band))
     names(output)[length(output)] <- "band"
   }
-  
-  
   v1 <- sum(diag(sm))
   if (model=='gaussian'){
     yhat <- apply(Fi, 1, sum)
