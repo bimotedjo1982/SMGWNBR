@@ -1390,137 +1390,75 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     return (yhbeta)
   }
   
-  
-  
-  if (!mgwr){
-    finb <- rep(0, N)
-    yhat_beta <- Offset
-    if (!is.null(h)){
-      hh <- h
-    }
-    else{
-      hh <- GSS(Y,X,finb)
-    }
-    header <- append(header, "General Bandwidth")
-    output <- append(output, hh)
-    names(output) <- "general_bandwidth"
-    
-    # === PATCH: pencarian optimal alpha khusus method adaptive_bsq_smr ===
-    if (method == "adaptive_bsq_smr") {
-      optimal_alpha <- find_optimal_alpha_gss(
-        hh, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta
-      )
-      res <- gwr_local(
-        H = hh, y = Y, x = X, fi = finb, alpha_val = optimal_alpha, 
-        method = method, model = model, N = N, nvarg = nvarg, wt = wt, E = E, 
-        COORD = COORD, sequ = sequ, distancekm = distancekm, Offset = Offset, 
-        parg = parg, yhat_beta = yhat_beta
-      )
-      yhat_beta <- res$yhbeta
-      sm <- res$sm
-      alphai <- res$alphai
-      sm3 <- res$sm3
-      # Jika ingin menyimpan optimal_alpha di output:
-      output$optimal_alpha <- optimal_alpha
-    } else {
-      # method lain tetap pakai gwr versi lama
-      yhat_beta <- gwr(hh,Y,X,finb)
-    }
-    
-    beta <- yhat_beta[,2:(nvarg+1)]
-    Fi <- X*beta
-    mband <- hh
-    Sm2 <- sm
+  if (!mgwr) {
+  finb <- rep(0, N)
+  yhat_beta <- Offset
+  if (!is.null(h)) {
+    hh <- h
+  } else {
+    hh <- GSS(Y, X, finb)
   }
-  else{
-    finb <- rep(0, N)
-    yhat_beta <- Offset
-    if (!is.null(h)){
-      hh <- h
-    }
-    else{
-      hh <- GSS(Y,X,finb)
-    }
-    header <- append(header, "General Bandwidth")
-    output <- append(output, hh)
-    names(output) <- "general_bandwidth"
-    #computing residuals
-    yhat_beta <- gwr(hh, Y, X, finb)
-    error <- Y-yhat_beta[ ,1]
-    beta <- yhat_beta[ ,2:(nvarg+1)]
-    Fi <- X*beta
-    Sm2 <- sm
-    for (jj in 1:nvarg){
-      m1 <- (jj-1)*N+1
-      m2 <- m1+(N-1)
-    }
-    mband <- rep(hh, nvarg)
-    socf <- 1
-    INT <- 1
-    mband_socf <- c(mband, socf)
-    while (socf>0.001 & INT<int){
-      fi_old <- Fi
-      diffi <- 0
-      fi2 <- 0
-      for (i in 1:nvarg){
-        if (model=="gaussian"){
-          ferror <- error+Fi[,i]
-          if (!is.null(h)){
-            mband[i] <- h
-          }
-          else{
-            mband[i] <- GSS(ferror, as.matrix(X[,i]), finb)
-          }
-          yhat_beta <- gwr(mband[i], ferror, as.matrix(X[,i]), finb)
-          beta[,i] <- yhat_beta[,2]
-          Fi[,i] <- X[,i]*beta[,i]
-          error <- Y-apply(Fi, 1, sum)
-          m1 <- (i-1)*N+1
-          m2 <- m1+(N-1)
-          mrj2 <- mrj[,m1:m2]
-          mrj[,m1:m2] <- rj%*%mrj[,m1:m2]+rj-rj%*%sm
-          sm <- sm-mrj2+mrj[,m1:m2]
-          Cm[,m1:m2] <- (1/X[,i])*mrj[,m1:m2]
-        }
-        else{ #else if (model=="poisson" | model=="negbin" | model=="logistic"){
-          yhat_beta <- (apply(Fi, 1, sum)+Offset)
-          if (!is.null(h)){
-            mband[i] <- h
-          }
-          else{
-            mband[i] <- GSS(Y, as.matrix(X[,i]), Fi[,i])
-          }
-          yhat_beta <- gwr(mband[i], Y, as.matrix(X[,i]), Fi[,i])
-          beta[,i] <- yhat_beta[,2]
-          Fi[,i] <- X[,i]*beta[,i]
-          m1 <- (i-1)*N+1
-          m2 <- m1+(N-1)
-          mrj2 <- mrj[,m1:m2]
-          mrj[,m1:m2] <- rj%*%mrj[,m1:m2]+rj-rj%*%sm
-          sm <- sm-mrj2+mrj[,m1:m2]
-          Cm[,m1:m2] <- (1/X[,i])*mrj[,m1:m2]
-          mAi[,i] <- ai
-        }
-        diffi <- diffi+mean((Fi[,i]-fi_old[,i])^2)
-        fi2 <- fi2+Fi[,i]
+  header <- append(header, "General Bandwidth")
+  output <- append(output, hh)
+  names(output) <- "general_bandwidth"
+  
+  yhat_beta <- gwr(hh, Y, X, finb)
+  error <- Y - yhat_beta[, 1]
+  beta <- yhat_beta[, 2:(nvarg + 1)]
+  Fi <- X * beta
+  
+  mband <- rep(hh, nvarg)
+  socf <- 1
+  INT <- 1
+  mband_socf <- c(mband, socf)
+  
+  while (socf > 0.001 && INT < int) {
+    fi_old <- Fi
+    diffi <- 0
+    fi2 <- 0
+    
+    for (i in 1:nvarg) {
+      ferror <- error + Fi[, i]
+      if (!is.null(h)) {
+        mband[i] <- h
+      } else {
+        mband[i] <- GSS(ferror, as.matrix(X[, i]), finb)
       }
-      socf <- sqrt(diffi/sum(fi2^2))
-      INT <- INT+1
-      mband_socf <- rbind(mband_socf, c(mband, socf))
+      
+      # Re-evaluate alpha for each bandwidth using GSS
+      if (method == "adaptive_bsq_smr") {
+        optimal_alpha <- find_optimal_alpha_gss(
+          mband[i], ferror, as.matrix(X[, i]), finb, N, 1, Offset,
+          method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta
+        )
+      } else {
+        optimal_alpha <- NULL  # Use default or other method
+      }
+      
+      yhat_beta <- gwr(mband[i], ferror, as.matrix(X[, i]), finb, alpha_val = optimal_alpha)
+      beta[, i] <- yhat_beta[, 2]
+      Fi[, i] <- X[, i] * beta[, i]
     }
-    mband_socf <- mband_socf[-1, ]
-    if (is.null(dim(mband_socf))){
-      band <- as.data.frame(t(mband_socf))
-    }
-    else{
-      band <- as.data.frame(mband_socf)
-    }
-    names(band) <- c("Intercept", XVAR, "socf")
-    rownames(band) <- NULL
-    header <- append(header, "Bandwidth")
-    output <- append(output, list(band))
-    names(output)[length(output)] <- "band"
+    
+    diffi <- sum((Fi - fi_old)^2)
+    fi2 <- sum(Fi^2)
+    socf <- sqrt(diffi / fi2)
+    INT <- INT + 1
   }
+  
+  if (INT >= int) {
+    band <- as.data.frame(mband_socf)
+  } else {
+    band <- as.data.frame(mband_socf)
+  }
+  names(band) <- c("Intercept", XVAR, "socf")
+  rownames(band) <- NULL
+  header <- append(header, "Bandwidth")
+  output <- append(output, list(band))
+  names(output)[length(output)] <- "band"
+}
+  
+ 
   v1 <- sum(diag(sm))
   if (model=='gaussian'){
     yhat <- apply(Fi, 1, sum)
@@ -1931,3 +1869,4 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
   message("NOTE: The denominator degrees of freedom for the t tests is ", dfg, ".")
   invisible(output)
 }
+
