@@ -1390,6 +1390,9 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     return (yhbeta)
   }
   
+
+  # Updated mgwnbr.R to find optimal alpha across bandwidths when mgwr=TRUE
+  
   if (!mgwr) {
     finb <- rep(0, N)
     yhat_beta <- Offset
@@ -1455,7 +1458,7 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
           mband[i] <- GSS(ferror, as.matrix(X[, i]), finb)
         }
         
-        # Re-evaluate alpha for each bandwidth using GSS
+        # Integrate alpha optimization for each bandwidth
         if (method == "adaptive_bsq_smr") {
           optimal_alpha <- find_optimal_alpha_gss(
             mband[i], ferror, as.matrix(X[, i]), finb, N, 1, Offset,
@@ -1491,7 +1494,9 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     output <- append(output, list(band))
     names(output)[length(output)] <- "band"
   }
-
+  
+  
+  
        v1 <- sum(diag(sm))
   if (model=='gaussian'){
     yhat <- apply(Fi, 1, sum)
