@@ -229,37 +229,75 @@ gwr_local <- function(H, y, x, fi, alpha_val = 0.5, method, model, N, nvarg, wt,
           }
           alpha <- as.vector(1/par)
         }
-        dev <- 0
-        ddev <- 1
-        cont2 <- 0
-        while (abs(ddev)>0.000001 & cont2<100){
-          uj <- ifelse(uj>E^100, E^100, uj)
-          ai <- as.vector((uj/(1+alpha*uj))+(y-uj)*(alpha*uj/(1+2*alpha*uj+alpha^2*uj*uj)))
-          ai <- ifelse(ai<=0, E^-5, ai)
-          zj <- nj+(y-uj)/(ai*(1+alpha*uj))-yhat_beta+fi
-          if (det(t(x)%*%(w*ai*x*wt))==0){
+        # Initialize loop counters and variables for tracking convergence and deviance, ensuring they start with safe finite values
+        cont2  <- 0L            # iteration counter for inner loop
+        olddev <- 0             # previous deviance value, start at 0 to avoid Inf-Inf issues
+        dev    <- 0             # current deviance value
+        ddev   <- Inf           # change in deviance, initialized large
+        
+        # Small numerical constant to prevent division by zero and log(0) issues
+        .eps <- 1e-10
+        # Ensure cont2 is a finite scalar before entering the loop
+        if (!is.finite(cont2)) cont2 <- 0L
+        
+        # Iterative loop with NA-safe condition to avoid unexpected logical NA errors
+        while (isTRUE(is.finite(ddev)) && abs(ddev) > 1e-6 && cont2 < 100L) {
+          # Clamp uj to avoid exponential overflow in later steps
+          uj <- pmin(uj, exp(100))
+          
+          # Compute ai using your original formulation, then ensure all values are positive and finite
+          ai <- as.vector((uj / (1 + alpha * uj)) + (y - uj) * (alpha * uj / (1 + 2 * alpha * uj + alpha^2 * uj * uj)))
+          ai <- pmax(ai, exp(-5))
+          
+          # Update zj vector, incorporating the offsets and current estimates
+          zj <- nj + (y - uj) / (ai * (1 + alpha * uj)) - yhat_beta + fi
+          
+          # Weighted cross-product matrix for solving b; safe determinant calculation
+          XtWA <- t(x) %*% (w * ai * x * wt)
+          detval <- tryCatch(det(XtWA), error = function(e) NA_real_)
+          
+          # If the determinant is zero or NA, set coefficients to zero to avoid singular matrix inversion
+          if (!is.finite(detval) || detval == 0) {
             b <- rep(0, nvar)
+          } else {
+            b <- MASS::ginv(XtWA) %*% t(x) %*% (w * ai * wt * zj)
           }
-          else{
-            b <- MASS::ginv(t(x)%*%(w*ai*x*wt))%*%t(x)%*%(w*ai*wt*zj)
-          }
-          nj <- x%*%b+yhat_beta-fi
-          nj <- ifelse(nj>E^2, E^2, nj)
+          
+          # Update the linear predictor nj, clamping extreme values to avoid overflow
+          nj <- x %*% b + yhat_beta - fi
+          nj <- ifelse(nj > exp(2), exp(2), nj)
+          
+          # Update uj from nj, and clamp extremely small values to prevent underflow
           uj <- as.vector(exp(nj))
+          uj <- pmax(uj, exp(-150))
+          
+          # Store previous deviance, then compute the new deviance depending on the model type
           olddev <- dev
-          uj <- ifelse(uj<E^-150, E^-150, uj)
-          tt <- y/uj
-          tt <- ifelse(tt==0, E^-10, tt)
-          if (model=="poisson"){
-            dev <- 2*sum(y*log(tt)-(y-uj))
+          tt <- y / uj
+          tt[!is.finite(tt)] <- .eps
+          
+          if (model == "poisson") {
+            dev <- 2 * sum(y * log(pmax(tt, .eps)) - (y - uj))
+          } else {
+            # Negative binomial branch with safe ratio calculation
+            ratio <- (1 + alpha * y) / (1 + alpha * uj)
+            dev <- 2 * sum(y * log(pmax(tt, .eps)) - (y + 1 / alpha) * log(pmax(ratio, .eps)))
           }
-          else{
-            dev <- 2*sum(y*log(tt)-(y+1/alpha)*log((1+alpha*y)/(1+alpha*uj)))
+          
+          # Check for non-finite deviance; break loop early if it occurs
+          if (!is.finite(dev)) {
+            warning("Deviance became non-finite; breaking optimization step.")
+            break
           }
-          cont2 <- cont2+1
+          
+          # Update change in deviance and increment loop counter
+          ddev  <- dev - olddev
+          cont2 <- cont2 + 1L
         }
-        cont <- cont+1
-        ddpar <- par-parold
+        
+        # Maintain your original outer loop counters and parameter differences
+        cont  <- cont + 1
+        ddpar <- par - parold
       }
       yhatm[i] <- uj[i]
       alphai[i, 2] <- alpha
@@ -790,7 +828,394 @@ mgwr <- function(
     alphai <- res_final$alphai
   }
   
-  list(
+  v1 <- sum(diag(sm))
+  if (model=='gaussian'){
+    yhat <- apply(Fi, 1, sum)
+    res <- Y-yhat
+    rsqr1 <- t(res*wt)%*%res
+    ym <- t(Y*wt)%*%Y
+    rsqr2 <- ym-(sum(Y*wt)^2)/sum(wt)
+    rsqr <- 1-rsqr1/rsqr2
+    rsqradj <- 1-((N-1)/(N-v1))*(1-rsqr)
+    sigma2 <- as.vector(N*rsqr1/((N-v1)*sum(wt)))
+    root_mse <- sqrt(sigma2)
+  }
+  for (jj in 1:nvarg){
+    m1 <- (jj-1)*N+1
+    m2 <- m1+(N-1)
+    ENP[jj] <- sum(diag(mrj[,m1:m2]))
+    if (!mgwr){
+      ENP[jj] <- sum(diag(sm))
+    }
+    if (model=='gaussian'){
+      if (!mgwr){
+        stdbm[,jj] <- sqrt(sigma2*sm3[,jj])
+      } else{
+        stdbm[,jj] <- sqrt(diag(sigma2*Cm[,m1:m2]%*%t(Cm[,m1:m2])))
+      }
+    } else{ #else if (model=='poisson' | model=='negbin' | model=='logistic'){
+      if (mgwr){
+        stdbm[,jj] <- sqrt(diag(Cm[,m1:m2]%*%diag(1/mAi[,jj])%*%t(Cm[,m1:m2])))
+      } else{
+        stdbm[,jj] <- sqrt(sm3[,jj])
+      }
+    }
+  }
+  if (model=='gaussian'){
+    ll <- -N*log(rsqr1/N)/2-N*log(2*acos(-1))/2-sum((Y-yhat)*(Y-yhat))/(2*(rsqr1/N))
+    AIC <- 2*v1-2*ll
+    AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
+    stats_measures <- c(sigma2, root_mse, round(rsqr, 4),
+                        round(rsqradj, 4), ll, AIC, AICc)
+    names(stats_measures) <- c("sigma2e", "root_mse",
+                               "R_square", "Adj_R_square",
+                               "full_Log_likelihood",
+                               "AIC", "AICc")
+    header <- append(header, "Measures")
+    output <- append(output, list(stats_measures))
+    names(output)[length(output)] <- "measures"
+  } else if (model=='poisson'){
+    yhat <- exp(apply(Fi, 1, sum)+Offset)
+    tt <- Y/yhat
+    tt <- ifelse(tt==0, E^-10, tt)
+    dev <- 2*sum(Y*log(tt)-(Y-yhat))
+    ll <- sum(-yhat+Y*log(yhat)-lgamma(Y+1))
+    AIC <- 2*v1-2*ll
+    AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
+    tt2 <- Y/mean(Y)
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnull <- 2*sum(Y*log(tt2)-(Y-mean(Y)))
+    pctdev <- 1-dev/devnull
+    adjpctdev <- 1-((N-1)/(N-v1))*(1-pctdev)
+    stats_measures <- c(dev, ll, pctdev, adjpctdev, AIC,
+                        AICc)
+    names(stats_measures) <- c("deviance",
+                               "full_Log_likelihood",
+                               "pctdev", "adjpctdev",
+                               "AIC", "AICc")
+    header <- append(header, "Measures")
+    output <- append(output, list(stats_measures))
+    names(output)[length(output)] <- "measures"
+  } else if (model=='negbin'){
+    yhat <- exp(apply(Fi, 1, sum)+Offset)
+    rmse_val <- sqrt(mean((Y - yhat)^2)) 
+    
+    tt <- Y/yhat
+    tt <- ifelse(tt==0, E^-10, tt)
+    dev <- 2*sum(Y*log(tt)-(Y+1/alphai[,2])*log((1+alphai[,2]*Y)/(1+alphai[,2]*yhat)))
+    ll <- sum(Y*log(alphai[,2]*yhat)-(Y+1/alphai[,2])*log(1+alphai[,2]*yhat)+lgamma(Y+1/alphai[,2])-lgamma(1/alphai[,2])-lgamma(Y+1))
+    AIC <- 2*(v1+v1/nvarg)-2*ll
+    AICc <- AIC+2*(v1+v1/nvarg)*(v1+v1/nvarg+1)/(N-(v1+v1/nvarg)-1)
+    tt2 <- Y/mean(Y)
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnull <- 2*sum(Y*log(tt2)-(Y+1/alphai[,2])*log((1+alphai[,2]*Y)/(1+alphai[,2]*mean(Y))))
+    pctdev <- 1-dev/devnull
+    adjpctdev <- 1-((N-1)/(N-(v1+v1/nvarg)))*(1-pctdev)
+    stats_measures <- c(rmse_val, dev, ll, pctdev, adjpctdev, AIC,
+                        AICc)
+    names(stats_measures) <- c("RMSE", "deviance",
+                               "full_Log_likelihood",
+                               "pctdev", "adjpctdev",
+                               "AIC", "AICc")
+    header <- append(header, "Measures")
+    output <- append(output, list(stats_measures))
+    names(output)[length(output)] <- "measures"
+  } else{ #else if (model=='logistic'){
+    yhat <- exp(apply(Fi, 1, sum))/(1+exp(apply(Fi, 1, sum)))
+    tt <- Y/yhat
+    tt <- ifelse(tt==0, E^-10, tt)
+    yhat2 <- ifelse(yhat==1, 0.99999, yhat)
+    tt2 <- (1-Y)/(1-yhat2)
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    dev <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
+    lyhat2 <- 1-yhat
+    lyhat2 <- ifelse(lyhat2==0, E^-10, lyhat2)
+    ll <- sum(Y*log(yhat)+(1-Y)*log(lyhat2))
+    AIC <- 2*v1-2*ll
+    AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
+    tt <- Y/mean(Y)
+    tt <- ifelse(tt==0, E^-10, tt)
+    tt2 <- (1-Y)/(1-mean(Y))
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnull <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
+    pctdev <- 1-dev/devnull
+    adjpctdev <- 1-((N-1)/(N-v1))*(1-pctdev)
+    stats_measures <- c(dev, ll, pctdev, adjpctdev, AIC,
+                        AICc)
+    names(stats_measures) <- c("deviance",
+                               "full_Log_likelihood",
+                               "pctdev", "adjpctdev",
+                               "AIC", "AICc")
+    header <- append(header, "Measures")
+    output <- append(output, list(stats_measures))
+    names(output)[length(output)] <- "measures"
+  }
+  
+  ENP[nvarg+1] <- sum(diag(sm))
+  ENP[nvarg+2] <- sum(diag(Sm2))
+  if (model=='negbin'){
+    ENP <- c(ENP, (v1/nvarg))
+    names(ENP) <- c('Intercept', XVAR, 'MGWR', 'GWR', 'alpha')
+  } else{
+    names(ENP) <- c('Intercept', XVAR, 'MGWR', 'GWR')
+  }
+  header <- append(header, "ENP")
+  output <- append(output, list(ENP))
+  names(output)[length(output)] <- "ENP"
+  dff <- N-v1
+  tstat <- beta/stdbm
+  probt <- 2*(1-pt(abs(tstat), dff))
+  malpha <- ENP
+  malpha[1:nvarg] <- 0.05/ENP[1:nvarg]
+  malpha[nvarg+1] <- 0.05*(nvarg/v1)
+  malpha[nvarg+2] <- 0.05*(nvarg/sum(diag(Sm2)))
+  if (!mgwr){
+    malpha[1:nvarg] <- 0.05*(nvarg/v1)
+  }
+  if (model=='negbin'){
+    malpha[nvarg+3] <- 0.05*(nvarg/v1)
+  }
+  t_critical <- abs(qt(malpha/2,dff))
+  beta2 <- beta
+  if (model=='negbin'){
+    alpha <- alphai[,2]
+    beta2 <- cbind(beta, alpha)
+  }
+  qntl <- apply(beta2, 2, quantile, c(0.25, 0.5, 0.75))
+  IQR <- (qntl[3,]-qntl[1,])
+  qntl <- rbind(round(qntl, 6), IQR=round(IQR, 6))
+  descriptb <- rbind(apply(beta2, 2, mean), apply(beta2, 2, min), apply(beta2, 2, max))
+  rownames(descriptb) <- c('Mean', 'Min', 'Max')
+  
+  final_estimates_df <- cbind(y_observed = Y, y_predicted = yhat, beta2)
+  
+  if (model=='negbin'){ #release 2
+    colnames(final_estimates_df) <- c('y_observed', 'y_predicted', 'Intercept', XVAR, 'alpha')#release 2
+  } else{ #release 2
+    colnames(final_estimates_df) <- c('y_observed', 'y_predicted', 'Intercept', XVAR) #release 2
+  } #release 2
+  output <- append(output, list(as.data.frame(final_estimates_df))) #release 2
+  names(output)[length(output)] <- "mgwr_param_estimates" #release 2
+  if (model=='negbin'){
+    colnames(qntl) <- c('Intercept', XVAR, 'alpha')
+  } else{
+    colnames(qntl) <- c('Intercept', XVAR)
+  }
+  header <- append(header, "Quantiles of MGWR Parameter Estimates")
+  output <- append(output, list(qntl))
+  names(output)[length(output)] <- "qntls_mgwr_param_estimates"
+  if (model=='negbin'){
+    colnames(descriptb) <- c('Intercept', XVAR, 'alpha')
+  } else{
+    colnames(descriptb) <- c('Intercept', XVAR)
+  }
+  header <- append(header, "Descriptive Statistics")
+  output <- append(output, list(descriptb))
+  names(output)[length(output)] <- "descript_stats_mgwr_param_estimates"
+  stdbeta <- stdbm
+  stdbeta2 <- stdbeta
+  if (model=='negbin'){
+    stdalpha <- alphai[,3]
+    stdbeta2 <- cbind(stdbeta, stdalpha)
+  }
+  qntls <- apply(stdbeta2, 2, quantile, c(0.25, 0.5, 0.75))
+  IQR <- (qntls[3,]-qntls[1,])
+  qntls <- rbind(round(qntls, 6), IQR=round(IQR, 6))
+  descripts <- rbind(apply(stdbeta2, 2, mean), apply(stdbeta2, 2, min), apply(stdbeta2, 2, max))
+  rownames(descripts) <- c('Mean', 'Min', 'Max')
+  header <- append(header, "alpha-level=0.05")
+  output <- append(output, list(malpha))
+  names(output)[length(output)] <- "p_values"
+  t_critical <- round(t_critical, 2)
+  header <- append(header, "t-Critical")
+  output <- append(output, list(t_critical))
+  names(output)[length(output)] <- "t_critical"
+  if (model=='negbin'){ #release 2
+    colnames(stdbeta2) <- c('Intercept', XVAR, 'alpha')#release 2
+  } else{ #release 2
+    colnames(stdbeta2) <- c('Intercept', XVAR) #release 2
+  } #release 2
+  output <- append(output, list(as.data.frame(stdbeta2))) #release 2
+  names(output)[length(output)] <- "mgwr_se" #release 2
+  if (model=='negbin'){
+    colnames(qntls) <- c('Intercept', XVAR, 'alpha')
+  } else{
+    colnames(qntls) <- c('Intercept', XVAR)
+  }
+  header <- append(header, "Quantiles of MGWR Standard Errors")
+  output <- append(output, list(qntls))
+  names(output)[length(output)] <- "qntls_mgwr_se"
+  if (model=='negbin'){
+    colnames(descripts) <- c('Intercept', XVAR, 'alpha')
+  } else{
+    colnames(descripts) <- c('Intercept', XVAR)
+  }
+  header <- append(header, "Descriptive Statistics of Standard Errors")
+  output <- append(output, list(descripts))
+  names(output)[length(output)] <- "descripts_stats_se"
+  #### global estimates ####
+  if (model=='gaussian'){
+    bg <- MASS::ginv(t(X)%*%(X*wt))%*%t(X)%*%(Y*wt)
+    s2g <- as.vector(t((Y-X%*%bg)*wt)%*%(Y-X%*%bg)/(N-nrow(bg)))
+    varg <- diag(MASS::ginv(t(X)%*%(X*wt))*s2g)
+  }
+  if (is.null(weight)){
+    vargd <- varg
+    dfg <- N-nrow(bg)
+  }
+  stdg <- matrix(sqrt(vargd))
+  if (model=='negbin'){
+    bg <- rbind(bg, alphag)
+    stdg <- rbind(stdg, sealphag)
+    dfg <- dfg-1
+  }
+  tg <- bg/stdg
+  probtg <- 2*(1-pt(abs(tg), dfg))
+  bg_stdg_tg_probtg <- cbind(bg, stdg, tg, probtg)
+  if (model=='negbin'){
+    rownames(bg_stdg_tg_probtg) <- c('Intercept', XVAR, 'alpha')
+  } else{
+    rownames(bg_stdg_tg_probtg) <- c('Intercept', XVAR)
+  }
+  colnames(bg_stdg_tg_probtg) <- c("Par. Est.", "Std Error", "t Value", "Pr > |t|")
+  header <- append(header, "Global Parameter Estimates")
+  output <- append(output, list(bg_stdg_tg_probtg))
+  names(output)[length(output)] <- "global_param_estimates"
+  header <- append(header, "NOTE: The denominator degrees of freedom for the t tests is...")
+  output <- append(output, list(dfg))
+  names(output)[length(output)] <- "t_test_dfs"
+  if (model=='gaussian'){
+    resg <- (Y-X%*%bg)
+    rsqr1g <- t(resg*wt)%*%resg
+    ymg <- t(Y*wt)%*%Y
+    rsqr2g <- ymg-(sum(Y*wt)^2)/sum(wt)
+    rsqrg <- 1-rsqr1g/rsqr2g
+    rsqradjg <- 1-((N-1)/(N-nrow(bg)))%*%(1-rsqrg)
+    sigma2g <- N*rsqr1g/((N-nrow(bg))*sum(wt))
+    root_mseg <- sqrt(sigma2g)
+    ll <- -N*log(rsqr1g/N)/2-N*log(2*acos(-1))/2-sum(resg*resg)/(2*(rsqr1g/N))
+    AIC <- -2*ll+2*nrow(bg)
+    AICc <- -2*ll+2*nrow(bg)*(N/(N-nrow(bg)-1))
+    global_measures <- c(sigma2g, root_mseg, round(c(rsqrg, rsqradjg), 4), ll, AIC, AICc)
+    names(global_measures) <- c('sigma2e', 'root_mse', "R_square", "Adj_R_square", 'full_Log_likelihood', 'AIC', 'AICc')
+    header <- append(header, "Global Measures")
+    output <- append(output, list(global_measures))
+    names(output)[length(output)] <- "global_measures"
+  } else if (model=='poisson'){
+    yhatg <- exp(X%*%bg+Offset)
+    ll <- sum(-yhatg+Y*log(yhatg)-lgamma(Y+1))
+    AIC <- -2*ll+2*nvarg
+    AICc <- -2*ll+2*nvarg*(N/(N-nvarg-1))
+    tt2 <- Y/mean(Y)
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnullg <- 2*sum(Y*log(tt2)-(Y-mean(Y)))
+    pctdevg <- 1-devg/devnullg
+    adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
+    global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
+    names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
+                                'adjpctdevg', 'AIC', 'AICc')
+    header <- append(header, "Global Measures")
+    output <- append(output, list(global_measures))
+    names(output)[length(output)] <- "global_measures"
+  } else if (model=='negbin'){
+    yhatg <- exp(X%*%bg[1:(nrow(bg)-1)]+Offset)
+    ll <- sum(Y*log(alphag*yhatg)-(Y+1/alphag)*log(1+alphag*yhatg)+lgamma(Y+1/alphag)-lgamma(1/alphag)-lgamma(Y+1))
+    AIC <- -2*ll+2*(nvarg+1)
+    AICc <- -2*ll+2*(nvarg+1)*(N/(N-(nvarg+1)-1))
+    tt2 <- Y/mean(Y)
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnullg <- 2*sum(Y*log(tt2)-(Y+1/alphag)*log((1+alphag*Y)/(1+alphag*mean(Y))))
+    pctdevg <- 1-devg/devnullg
+    adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
+    global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
+    names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
+                                'adjpctdevg', 'AIC', 'AICc')
+    header <- append(header, "Global Measures")
+    output <- append(output, list(global_measures))
+    names(output)[length(output)] <- "global_measures"
+  } else{ #else if (model=='logistic'){
+    yhatg <- exp(X%*%bg)/(1+exp(X%*%bg))
+    lyhat2 <- 1-yhatg
+    lyhat2 <- ifelse(lyhat2==0, E^-10, lyhat2)
+    ll <- sum(Y*log(yhatg)+(1-Y)*log(lyhat2))
+    AIC <- -2*ll+2*nvarg
+    AICc <- -2*ll+2*nvarg*(N/(N-nvarg-1))
+    tt <- Y/mean(Y)
+    tt <- ifelse(tt==0, E^-10, tt)
+    tt2 <- (1-Y)/(1-mean(Y))
+    tt2 <- ifelse(tt2==0, E^-10, tt2)
+    devnullg <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
+    pctdevg <- 1-devg/devnullg
+    adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
+    global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
+    names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
+                                'adjpctdevg', 'AIC', 'AICc')
+    header <- append(header, "Global Measures")
+    output <- append(output, list(global_measures))
+    names(output)[length(output)] <- "global_measures"
+  }
+  bistdt <- cbind(COORD, beta, stdbm, tstat, probt)
+  colname1 <- c("Intercept", XVAR)
+  parameters2 <- as.data.frame(bistdt)
+  names(parameters2) <- c('x', 'y', colname1, paste('std_', colname1, sep=''), paste('tstat_', colname1, sep=''), paste('probt_', colname1, sep=''))
+  sig <- matrix("not significant at 90%", N, nvarg)
+  for (i in 1:N){
+    for (j in 1:nvarg){
+      if (probt[i,j]<0.01/ENP[j]){
+        sig[i,j] <- "significant at 99%"
+      } else if (probt[i,j]<0.05/ENP[j]){
+        sig[i,j] <- "significant at 95%"
+      } else if (probt[i,j]<0.1/ENP[j]){
+        sig[i,j] <- "significant at 90%"
+      } else{
+        sig[i,j] <- "not significant at 90%"
+      }
+    }
+  }
+  sig_parameters2 <- as.data.frame(sig)
+  names(sig_parameters2) <- c(paste('sig_', colname1, sep=''))
+  if (model=='negbin'){
+    atstat <- alphai[,2]/alphai[,3]
+    aprobtstat <- 2*(1-pnorm(abs(atstat)))
+    siga <- rep("not significant at 90%", N)
+    for (i in 1:N){
+      if (aprobtstat[i]<0.01*(nvarg/v1)){
+        siga[i] <- "significant at 99%"
+      } else if (aprobtstat[i]<0.05*(nvarg/v1)){
+        siga[i] <- "significant at 95%"
+      } else if (aprobtstat[i]<0.1*(nvarg/v1)){
+        siga[i] <- "significant at 90%"
+      } else{
+        siga[i] <- "not significant at 90%"
+      }
+    }
+    alphai <- cbind(alphai, atstat, aprobtstat)
+    Alpha <- as.data.frame(alphai)
+    names(Alpha) <- c("id", "alpha", "std", "tstat", "probt")
+    sig_alpha <- as.data.frame(siga)
+    names(sig_alpha) <- "sig_alpha"
+  }
+  ###################################
+  min_bandwidth <- as.data.frame(t(mband))
+  if (!mgwr){
+    names(min_bandwidth) <- 'Intercept'
+  } else{
+    names(min_bandwidth) <- colname1
+  }
+  parameters2 <- cbind(parameters2, sig_parameters2)
+  if (model=='negbin'){
+    Alpha <- cbind(Alpha, sig_alpha)
+  }
+  # i <- 1
+  # for (element in output){
+  #   cat(header[i], "\n")
+  #   print(element)
+  #   i <- i+1
+  # }
+  message("NOTE: The denominator degrees of freedom for the t tests is ", dfg, ".")
+  invisible(output)
+  
+  return(list(
     header = header,
     output = output,
     yhbeta = yhbeta,
@@ -798,420 +1223,5 @@ mgwr <- function(
     alphai = alphai,
     mband = mband,
     converged = (nrow(band) == 0L) || band$socf[nrow(band)] <= 0.001
-  )
-}
-
-v1 <- sum(diag(sm))
-if (model=='gaussian'){
-  yhat <- apply(Fi, 1, sum)
-  res <- Y-yhat
-  rsqr1 <- t(res*wt)%*%res
-  ym <- t(Y*wt)%*%Y
-  rsqr2 <- ym-(sum(Y*wt)^2)/sum(wt)
-  rsqr <- 1-rsqr1/rsqr2
-  rsqradj <- 1-((N-1)/(N-v1))*(1-rsqr)
-  sigma2 <- as.vector(N*rsqr1/((N-v1)*sum(wt)))
-  root_mse <- sqrt(sigma2)
-}
-for (jj in 1:nvarg){
-  m1 <- (jj-1)*N+1
-  m2 <- m1+(N-1)
-  ENP[jj] <- sum(diag(mrj[,m1:m2]))
-  if (!mgwr){
-    ENP[jj] <- sum(diag(sm))
-  }
-  if (model=='gaussian'){
-    if (!mgwr){
-      stdbm[,jj] <- sqrt(sigma2*sm3[,jj])
-    }
-    else{
-      stdbm[,jj] <- sqrt(diag(sigma2*Cm[,m1:m2]%*%t(Cm[,m1:m2])))
-    }
-  }
-  else{ #else if (model=='poisson' | model=='negbin' | model=='logistic'){
-    if (mgwr){
-      stdbm[,jj] <- sqrt(diag(Cm[,m1:m2]%*%diag(1/mAi[,jj])%*%t(Cm[,m1:m2])))
-    }
-    else{
-      stdbm[,jj] <- sqrt(sm3[,jj])
-    }
-  }
-}
-if (model=='gaussian'){
-  ll <- -N*log(rsqr1/N)/2-N*log(2*acos(-1))/2-sum((Y-yhat)*(Y-yhat))/(2*(rsqr1/N))
-  AIC <- 2*v1-2*ll
-  AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
-  stats_measures <- c(sigma2, root_mse, round(rsqr, 4),
-                      round(rsqradj, 4), ll, AIC, AICc)
-  names(stats_measures) <- c("sigma2e", "root_mse",
-                             "R_square", "Adj_R_square",
-                             "full_Log_likelihood",
-                             "AIC", "AICc")
-  header <- append(header, "Measures")
-  output <- append(output, list(stats_measures))
-  names(output)[length(output)] <- "measures"
-}
-else if (model=='poisson'){
-  yhat <- exp(apply(Fi, 1, sum)+Offset)
-  tt <- Y/yhat
-  tt <- ifelse(tt==0, E^-10, tt)
-  dev <- 2*sum(Y*log(tt)-(Y-yhat))
-  ll <- sum(-yhat+Y*log(yhat)-lgamma(Y+1))
-  AIC <- 2*v1-2*ll
-  AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
-  tt2 <- Y/mean(Y)
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnull <- 2*sum(Y*log(tt2)-(Y-mean(Y)))
-  pctdev <- 1-dev/devnull
-  adjpctdev <- 1-((N-1)/(N-v1))*(1-pctdev)
-  stats_measures <- c(dev, ll, pctdev, adjpctdev, AIC,
-                      AICc)
-  names(stats_measures) <- c("deviance",
-                             "full_Log_likelihood",
-                             "pctdev", "adjpctdev",
-                             "AIC", "AICc")
-  header <- append(header, "Measures")
-  output <- append(output, list(stats_measures))
-  names(output)[length(output)] <- "measures"
-}
-else if (model=='negbin'){
-  yhat <- exp(apply(Fi, 1, sum)+Offset)
-  rmse_val <- sqrt(mean((Y - yhat)^2)) 
-  
-  tt <- Y/yhat
-  tt <- ifelse(tt==0, E^-10, tt)
-  dev <- 2*sum(Y*log(tt)-(Y+1/alphai[,2])*log((1+alphai[,2]*Y)/(1+alphai[,2]*yhat)))
-  ll <- sum(Y*log(alphai[,2]*yhat)-(Y+1/alphai[,2])*log(1+alphai[,2]*yhat)+lgamma(Y+1/alphai[,2])-lgamma(1/alphai[,2])-lgamma(Y+1))
-  AIC <- 2*(v1+v1/nvarg)-2*ll
-  AICc <- AIC+2*(v1+v1/nvarg)*(v1+v1/nvarg+1)/(N-(v1+v1/nvarg)-1)
-  tt2 <- Y/mean(Y)
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnull <- 2*sum(Y*log(tt2)-(Y+1/alphai[,2])*log((1+alphai[,2]*Y)/(1+alphai[,2]*mean(Y))))
-  pctdev <- 1-dev/devnull
-  adjpctdev <- 1-((N-1)/(N-(v1+v1/nvarg)))*(1-pctdev)
-  stats_measures <- c(rmse_val, dev, ll, pctdev, adjpctdev, AIC,
-                      AICc)
-  names(stats_measures) <- c("RMSE", "deviance",
-                             "full_Log_likelihood",
-                             "pctdev", "adjpctdev",
-                             "AIC", "AICc")
-  header <- append(header, "Measures")
-  output <- append(output, list(stats_measures))
-  names(output)[length(output)] <- "measures"
-}
-else{ #else if (model=='logistic'){
-  yhat <- exp(apply(Fi, 1, sum))/(1+exp(apply(Fi, 1, sum)))
-  tt <- Y/yhat
-  tt <- ifelse(tt==0, E^-10, tt)
-  yhat2 <- ifelse(yhat==1, 0.99999, yhat)
-  tt2 <- (1-Y)/(1-yhat2)
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  dev <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
-  lyhat2 <- 1-yhat
-  lyhat2 <- ifelse(lyhat2==0, E^-10, lyhat2)
-  ll <- sum(Y*log(yhat)+(1-Y)*log(lyhat2))
-  AIC <- 2*v1-2*ll
-  AICc <- AIC+2*(v1*(v1+1)/(N-v1-1))
-  tt <- Y/mean(Y)
-  tt <- ifelse(tt==0, E^-10, tt)
-  tt2 <- (1-Y)/(1-mean(Y))
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnull <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
-  pctdev <- 1-dev/devnull
-  adjpctdev <- 1-((N-1)/(N-v1))*(1-pctdev)
-  stats_measures <- c(dev, ll, pctdev, adjpctdev, AIC,
-                      AICc)
-  names(stats_measures) <- c("deviance",
-                             "full_Log_likelihood",
-                             "pctdev", "adjpctdev",
-                             "AIC", "AICc")
-  header <- append(header, "Measures")
-  output <- append(output, list(stats_measures))
-  names(output)[length(output)] <- "measures"
-}
-
-
-
-
-ENP[nvarg+1] <- sum(diag(sm))
-ENP[nvarg+2] <- sum(diag(Sm2))
-if (model=='negbin'){
-  ENP <- c(ENP, (v1/nvarg))
-  names(ENP) <- c('Intercept', XVAR, 'MGWR', 'GWR', 'alpha')
-}
-else{
-  names(ENP) <- c('Intercept', XVAR, 'MGWR', 'GWR')
-}
-header <- append(header, "ENP")
-output <- append(output, list(ENP))
-names(output)[length(output)] <- "ENP"
-dff <- N-v1
-tstat <- beta/stdbm
-probt <- 2*(1-pt(abs(tstat), dff))
-malpha <- ENP
-malpha[1:nvarg] <- 0.05/ENP[1:nvarg]
-malpha[nvarg+1] <- 0.05*(nvarg/v1)
-malpha[nvarg+2] <- 0.05*(nvarg/sum(diag(Sm2)))
-if (!mgwr){
-  malpha[1:nvarg] <- 0.05*(nvarg/v1)
-}
-if (model=='negbin'){
-  malpha[nvarg+3] <- 0.05*(nvarg/v1)
-}
-t_critical <- abs(qt(malpha/2,dff))
-beta2 <- beta
-if (model=='negbin'){
-  alpha <- alphai[,2]
-  beta2 <- cbind(beta, alpha)
-}
-qntl <- apply(beta2, 2, quantile, c(0.25, 0.5, 0.75))
-IQR <- (qntl[3,]-qntl[1,])
-qntl <- rbind(round(qntl, 6), IQR=round(IQR, 6))
-descriptb <- rbind(apply(beta2, 2, mean), apply(beta2, 2, min), apply(beta2, 2, max))
-rownames(descriptb) <- c('Mean', 'Min', 'Max')
-
-final_estimates_df <- cbind(y_observed = Y, y_predicted = yhat, beta2)
-
-if (model=='negbin'){ #release 2
-  colnames(final_estimates_df) <- c('y_observed', 'y_predicted', 'Intercept', XVAR, 'alpha')#release 2
-} #release 2
-else{ #release 2
-  colnames(final_estimates_df) <- c('y_observed', 'y_predicted', 'Intercept', XVAR) #release 2
-} #release 2
-output <- append(output, list(as.data.frame(final_estimates_df))) #release 2
-names(output)[length(output)] <- "mgwr_param_estimates" #release 2
-if (model=='negbin'){
-  colnames(qntl) <- c('Intercept', XVAR, 'alpha')
-}
-else{
-  colnames(qntl) <- c('Intercept', XVAR)
-}
-header <- append(header, "Quantiles of MGWR Parameter Estimates")
-output <- append(output, list(qntl))
-names(output)[length(output)] <- "qntls_mgwr_param_estimates"
-if (model=='negbin'){
-  colnames(descriptb) <- c('Intercept', XVAR, 'alpha')
-}
-else{
-  colnames(descriptb) <- c('Intercept', XVAR)
-}
-header <- append(header, "Descriptive Statistics")
-output <- append(output, list(descriptb))
-names(output)[length(output)] <- "descript_stats_mgwr_param_estimates"
-stdbeta <- stdbm
-stdbeta2 <- stdbeta
-if (model=='negbin'){
-  stdalpha <- alphai[,3]
-  stdbeta2 <- cbind(stdbeta, stdalpha)
-}
-qntls <- apply(stdbeta2, 2, quantile, c(0.25, 0.5, 0.75))
-IQR <- (qntls[3,]-qntls[1,])
-qntls <- rbind(round(qntls, 6), IQR=round(IQR, 6))
-descripts <- rbind(apply(stdbeta2, 2, mean), apply(stdbeta2, 2, min), apply(stdbeta2, 2, max))
-rownames(descripts) <- c('Mean', 'Min', 'Max')
-header <- append(header, "alpha-level=0.05")
-output <- append(output, list(malpha))
-names(output)[length(output)] <- "p_values"
-t_critical <- round(t_critical, 2)
-header <- append(header, "t-Critical")
-output <- append(output, list(t_critical))
-names(output)[length(output)] <- "t_critical"
-if (model=='negbin'){ #release 2
-  colnames(stdbeta2) <- c('Intercept', XVAR, 'alpha')#release 2
-} #release 2
-else{ #release 2
-  colnames(stdbeta2) <- c('Intercept', XVAR) #release 2
-} #release 2
-output <- append(output, list(as.data.frame(stdbeta2))) #release 2
-names(output)[length(output)] <- "mgwr_se" #release 2
-if (model=='negbin'){
-  colnames(qntls) <- c('Intercept', XVAR, 'alpha')
-}
-else{
-  colnames(qntls) <- c('Intercept', XVAR)
-}
-header <- append(header, "Quantiles of MGWR Standard Errors")
-output <- append(output, list(qntls))
-names(output)[length(output)] <- "qntls_mgwr_se"
-if (model=='negbin'){
-  colnames(descripts) <- c('Intercept', XVAR, 'alpha')
-}
-else{
-  colnames(descripts) <- c('Intercept', XVAR)
-}
-header <- append(header, "Descriptive Statistics of Standard Errors")
-output <- append(output, list(descripts))
-names(output)[length(output)] <- "descripts_stats_se"
-#### global estimates ####
-if (model=='gaussian'){
-  bg <- MASS::ginv(t(X)%*%(X*wt))%*%t(X)%*%(Y*wt)
-  s2g <- as.vector(t((Y-X%*%bg)*wt)%*%(Y-X%*%bg)/(N-nrow(bg)))
-  varg <- diag(MASS::ginv(t(X)%*%(X*wt))*s2g)
-}
-if (is.null(weight)){
-  vargd <- varg
-  dfg <- N-nrow(bg)
-}
-stdg <- matrix(sqrt(vargd))
-if (model=='negbin'){
-  bg <- rbind(bg, alphag)
-  stdg <- rbind(stdg, sealphag)
-  dfg <- dfg-1
-}
-tg <- bg/stdg
-probtg <- 2*(1-pt(abs(tg), dfg))
-bg_stdg_tg_probtg <- cbind(bg, stdg, tg, probtg)
-if (model=='negbin'){
-  rownames(bg_stdg_tg_probtg) <- c('Intercept', XVAR, 'alpha')
-}
-else{
-  rownames(bg_stdg_tg_probtg) <- c('Intercept', XVAR)
-}
-colnames(bg_stdg_tg_probtg) <- c("Par. Est.", "Std Error", "t Value", "Pr > |t|")
-header <- append(header, "Global Parameter Estimates")
-output <- append(output, list(bg_stdg_tg_probtg))
-names(output)[length(output)] <- "global_param_estimates"
-header <- append(header, "NOTE: The denominator degrees of freedom for the t tests is...")
-output <- append(output, list(dfg))
-names(output)[length(output)] <- "t_test_dfs"
-if (model=='gaussian'){
-  resg <- (Y-X%*%bg)
-  rsqr1g <- t(resg*wt)%*%resg
-  ymg <- t(Y*wt)%*%Y
-  rsqr2g <- ymg-(sum(Y*wt)^2)/sum(wt)
-  rsqrg <- 1-rsqr1g/rsqr2g
-  rsqradjg <- 1-((N-1)/(N-nrow(bg)))%*%(1-rsqrg)
-  sigma2g <- N*rsqr1g/((N-nrow(bg))*sum(wt))
-  root_mseg <- sqrt(sigma2g)
-  ll <- -N*log(rsqr1g/N)/2-N*log(2*acos(-1))/2-sum(resg*resg)/(2*(rsqr1g/N))
-  AIC <- -2*ll+2*nrow(bg)
-  AICc <- -2*ll+2*nrow(bg)*(N/(N-nrow(bg)-1))
-  global_measures <- c(sigma2g, root_mseg, round(c(rsqrg, rsqradjg), 4), ll, AIC, AICc)
-  names(global_measures) <- c('sigma2e', 'root_mse', "R_square", "Adj_R_square", 'full_Log_likelihood', 'AIC', 'AICc')
-  header <- append(header, "Global Measures")
-  output <- append(output, list(global_measures))
-  names(output)[length(output)] <- "global_measures"
-}
-else if (model=='poisson'){
-  yhatg <- exp(X%*%bg+Offset)
-  ll <- sum(-yhatg+Y*log(yhatg)-lgamma(Y+1))
-  AIC <- -2*ll+2*nvarg
-  AICc <- -2*ll+2*nvarg*(N/(N-nvarg-1))
-  tt2 <- Y/mean(Y)
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnullg <- 2*sum(Y*log(tt2)-(Y-mean(Y)))
-  pctdevg <- 1-devg/devnullg
-  adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
-  global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
-  names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
-                              'adjpctdevg', 'AIC', 'AICc')
-  header <- append(header, "Global Measures")
-  output <- append(output, list(global_measures))
-  names(output)[length(output)] <- "global_measures"
-}
-else if (model=='negbin'){
-  yhatg <- exp(X%*%bg[1:(nrow(bg)-1)]+Offset)
-  ll <- sum(Y*log(alphag*yhatg)-(Y+1/alphag)*log(1+alphag*yhatg)+lgamma(Y+1/alphag)-lgamma(1/alphag)-lgamma(Y+1))
-  AIC <- -2*ll+2*(nvarg+1)
-  AICc <- -2*ll+2*(nvarg+1)*(N/(N-(nvarg+1)-1))
-  tt2 <- Y/mean(Y)
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnullg <- 2*sum(Y*log(tt2)-(Y+1/alphag)*log((1+alphag*Y)/(1+alphag*mean(Y))))
-  pctdevg <- 1-devg/devnullg
-  adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
-  global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
-  names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
-                              'adjpctdevg', 'AIC', 'AICc')
-  header <- append(header, "Global Measures")
-  output <- append(output, list(global_measures))
-  names(output)[length(output)] <- "global_measures"
-}
-else{ #else if (model=='logistic'){
-  yhatg <- exp(X%*%bg)/(1+exp(X%*%bg))
-  lyhat2 <- 1-yhatg
-  lyhat2 <- ifelse(lyhat2==0, E^-10, lyhat2)
-  ll <- sum(Y*log(yhatg)+(1-Y)*log(lyhat2))
-  AIC <- -2*ll+2*nvarg
-  AICc <- -2*ll+2*nvarg*(N/(N-nvarg-1))
-  tt <- Y/mean(Y)
-  tt <- ifelse(tt==0, E^-10, tt)
-  tt2 <- (1-Y)/(1-mean(Y))
-  tt2 <- ifelse(tt2==0, E^-10, tt2)
-  devnullg <- 2*sum((Y*log(tt))+(1-Y)*log(tt2))
-  pctdevg <- 1-devg/devnullg
-  adjpctdevg <- 1-((N-1)/(N-nvarg))*(1-pctdevg)
-  global_measures <- c(devg, ll, pctdevg, adjpctdevg, AIC, AICc)
-  names(global_measures) <- c('deviance', 'full_Log_likelihood', 'pctdevg',
-                              'adjpctdevg', 'AIC', 'AICc')
-  header <- append(header, "Global Measures")
-  output <- append(output, list(global_measures))
-  names(output)[length(output)] <- "global_measures"
-}
-bistdt <- cbind(COORD, beta, stdbm, tstat, probt)
-colname1 <- c("Intercept", XVAR)
-parameters2 <- as.data.frame(bistdt)
-names(parameters2) <- c('x', 'y', colname1, paste('std_', colname1, sep=''), paste('tstat_', colname1, sep=''), paste('probt_', colname1, sep=''))
-sig <- matrix("not significant at 90%", N, nvarg)
-for (i in 1:N){
-  for (j in 1:nvarg){
-    if (probt[i,j]<0.01/ENP[j]){
-      sig[i,j] <- "significant at 99%"
-    }
-    else if (probt[i,j]<0.05/ENP[j]){
-      sig[i,j] <- "significant at 95%"
-    }
-    else if (probt[i,j]<0.1/ENP[j]){
-      sig[i,j] <- "significant at 90%"
-    }
-    else{
-      sig[i,j] <- "not significant at 90%"
-    }
-  }
-}
-sig_parameters2 <- as.data.frame(sig)
-names(sig_parameters2) <- c(paste('sig_', colname1, sep=''))
-if (model=='negbin'){
-  atstat <- alphai[,2]/alphai[,3]
-  aprobtstat <- 2*(1-pnorm(abs(atstat)))
-  siga <- rep("not significant at 90%", N)
-  for (i in 1:N){
-    if (aprobtstat[i]<0.01*(nvarg/v1)){
-      siga[i] <- "significant at 99%"
-    }
-    else if (aprobtstat[i]<0.05*(nvarg/v1)){
-      siga[i] <- "significant at 95%"
-    }
-    else if (aprobtstat[i]<0.1*(nvarg/v1)){
-      siga[i] <- "significant at 90%"
-    }
-    else{
-      siga[i] <- "not significant at 90%"
-    }
-  }
-  alphai <- cbind(alphai, atstat, aprobtstat)
-  Alpha <- as.data.frame(alphai)
-  names(Alpha) <- c("id", "alpha", "std", "tstat", "probt")
-  sig_alpha <- as.data.frame(siga)
-  names(sig_alpha) <- "sig_alpha"
-}
-###################################
-min_bandwidth <- as.data.frame(t(mband))
-if (!mgwr){
-  names(min_bandwidth) <- 'Intercept'
-}
-else{
-  names(min_bandwidth) <- colname1
-}
-parameters2 <- cbind(parameters2, sig_parameters2)
-if (model=='negbin'){
-  Alpha <- cbind(Alpha, sig_alpha)
-}
-# i <- 1
-# for (element in output){
-#   cat(header[i], "\n")
-#   print(element)
-#   i <- i+1
-# }
-message("NOTE: The denominator degrees of freedom for the t tests is ", dfg, ".")
-invisible(output)
+  ))
 }
