@@ -289,7 +289,7 @@ adaptive_grid_search_with_offset <- function(var_idx, Fi, mband, Y, X, method, m
   phi <- (1 + sqrt(5)) / 2
   a <- best_cell[1]
   b <- best_cell[2]
-  tolerance <- 0.01
+  tolerance <- 0.1
   
   # Golden section search for optimal alphaW
   c <- b - (b - a) / phi
@@ -709,7 +709,7 @@ gwr_local <- function(H, y, x, fi, alphaW_val = 0.5, method, model, N, nvarg, wt
 # Golden Section Search for optimal alphaW
 
 find_optimal_alphaW_gss <- function(
-    H, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta, tol = 0.01
+    H, Y, X, finb, N, nvarg, Offset, method, model, wt, E, COORD, sequ, distancekm, parg, yhat_beta, tol = 0.1
 ) {
   # Golden Section Search for optimal alphaW
   phi <- (1 + sqrt(5)) / 2
@@ -1334,6 +1334,7 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
     }
     r <- 0.61803399
     tol <- 0.1
+    
     if (!globalmin){
       lower <- ax
       upper <- bx
@@ -2204,13 +2205,26 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
       if (verbose) cat("      AICc:", round(baseline_AICc, 2), "\n")
       if (verbose) cat("      Percent deviance explained:", round(baseline_percent_deviance, 4), "\n")
       
-      # STEP 2: Now start back-fitting to improve upon the baseline
-      if (verbose) cat("  - Starting back-fitting process with Adaptive Grid Search for Alphas...\n")
+      # STEP 2: Find optimum multi-bandwidths using alphaW = 1 (purely spatial) - FIXED for alphaW optimization
+      if (verbose) cat("  - Step 4.2: Finding optimum multi-bandwidths using alphaW = 1 (purely spatial)...\n")
+      mband <- rep(0, nvarg)
+      
+      # Optimize bandwidth for each variable with alphaW = 1.0 (purely spatial)
+      for (i in 1:nvarg) {
+        if (verbose) cat("    * Optimizing bandwidth for variable", i, "of", nvarg, "\n")
+        # Use alphaW = 1 for purely spatial bandwidth calculation
+        mband[i] <- GSS_with_alpha(Y, as.matrix(X[,i]), rep(0, N), COORD, sequ, distancekm, method, 1.0)
+      }
+      if (verbose) cat("  - Multi-bandwidths optimized:", paste(round(mband, 2), collapse=", "), "\n")
+      cat("DEBUG: Optimum multi-bandwidths (alphaW = 1) =", paste(round(mband, 2), collapse=", "), "\n")
+      
+      # STEP 3: Now start back-fitting to optimize alphaWs with FIXED bandwidths
+      if (verbose) cat("  - Step 4.3: Starting back-fitting for AlphaW optimization (bandwidths are FIXED)...\n")
       
       # Initialize back-fitting with simple iteration-based convergence
       INT <- 1
       optimal_alphas <- rep(baseline_optimal_alphaW, nvarg) # Initialize with optimal alphaW from baseline
-      max_iterations <- 5  # Reduced for faster convergence with AIC-only stopping
+      max_iterations <- 50  # Reduced for faster convergence with AIC-only stopping
       early_stop <- FALSE  # Flag for early stopping
       
       # Initialize iteration performance tracking
@@ -2231,42 +2245,17 @@ mgwnbr <- function(data, formula, weight=NULL, lat, long,
         fi_old <- Fi
         
         for (i in 1:nvarg) {
-          if (verbose) cat("\n    Optimizing variable", i, " (", colnames(X)[i], ")...\n")
+          if (verbose) cat("\n    Optimizing alphaW for variable", i, " (", colnames(X)[i], ") with FIXED bandwidth:", round(mband[i], 2), "...\n")
           
-          # Calculate offset from other variables
-          offset_for_i <- Offset
-          if(nvarg > 1) {
-            Fi_others <- Fi[, -i, drop = FALSE]
-            offset_for_i <- offset_for_i + apply(Fi_others, 1, sum)
-          }
+          # Bandwidths are FIXED (pre-calculated with alphaW=1), only optimize alphaW
           X_var <- as.matrix(X[, i])
           
-          # Check if offset is reasonable
-          if (any(is.na(offset_for_i)) || any(is.infinite(offset_for_i))) {
-            if (verbose) cat("      Warning: Invalid offset detected, using global offset\n")
-            offset_for_i <- Offset
-          }
-          
-          # Optimize bandwidth using GSS with the correct offset
-          tryCatch({
-            mband[i] <- GSS(Y, X_var, offset_for_i)
-            if (is.na(mband[i]) || is.infinite(mband[i]) || mband[i] <= 0) {
-              if (verbose) cat("      Warning: Invalid bandwidth, using previous value\n")
-              mband[i] <- if (i > 1) mband[i-1] else hh
-            }
-            if (verbose) cat("      Optimized bandwidth for variable", i, ":", round(mband[i], 2), "\n")
-          }, error = function(e) {
-            if (verbose) cat("      Warning: Bandwidth optimization failed, using previous value\n")
-            mband[i] <- if (i > 1) mband[i-1] else hh
-            if (verbose) cat("      Using fallback bandwidth for variable", i, ":", round(mband[i], 2), "\n")
-          })
-          
-          # --- FIX: Pass the 'Offset' variable and baseline_alphaWs to the search function ---
+          # --- Optimize alphaW with fixed bandwidth ---
           search_result <- adaptive_grid_search_with_offset(
             var_idx = i, Fi = Fi, mband = mband, Y = Y, X = X, method = method, 
             model = model, N = N, nvarg = nvarg, wt = wt, E = E, COORD = COORD, 
             sequ = sequ, distancekm = distancekm, Offset = Offset, # <- FIX IS HERE
-            parg = parg, verbose = verbose, baseline_alphaWs = rep(baseline_optimal_alphaW, nvarg)
+            parg = parg, verbose = verbose, baseline_alphaWs = optimal_alphas
           )
           optimal_alphas[i] <- search_result$alpha
           current_variable_aicc <- search_result$aicc
